@@ -1,0 +1,179 @@
+# Builds lid-dailyquests.dll (a plugin for the LiD Plugin Loader) from the
+# source in this repository and runs the tests on every push. Pushing a tag such
+# as v0.1.0 also publishes a release: the plugin built here, its SHA-256 sum
+# and a signed record (attestation) tying it to this workflow run and commit.
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install Zig
+        run: python -m pip install ziglang==0.16.0
+
+      - name: Build and test lid-dailyquests.dll
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            python build.py --test --package --tag $env:GITHUB_REF_NAME
+          } else {
+            python build.py --test --package
+          }
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Package the release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory release | Out-Null
+          Copy-Item out/lid-dailyquests.dll release/
+          Copy-Item out/LiD-Daily-Quests.zip release/
+          $sums = Get-ChildItem release -File | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          }
+          $sums | Set-Content -Encoding ascii release/SHA256SUMS.txt
+          Get-Content release/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: release/
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # create the release
+      id-token: write       # sign the attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0    # the commits since the last tag, for the Discord card
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: release
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            release/lid-dailyquests.dll
+            release/LiD-Daily-Quests.zip
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "Built by GitHub Actions from commit ${GITHUB_SHA} - [build log and tests](${RUN_URL})."
+            echo
+            echo "| File | SHA-256 |"
+            echo "|---|---|"
+            tr -d '\r' < release/SHA256SUMS.txt | awk -v q='`' '{ printf "| %s | %s%s%s |\n", $2, q, $1, q }'
+            echo
+            echo "**Check the DLL is the one built here**, with the [GitHub CLI](https://cli.github.com/):"
+            echo
+            echo '```'
+            echo "gh attestation verify lid-dailyquests.dll --repo ${REPO}"
+            echo '```'
+            echo
+            echo "Or rebuild it yourself and compare the SHA-256 - see **Building it yourself** in the README."
+          } > notes.md
+          files="release/lid-dailyquests.dll release/LiD-Daily-Quests.zip release/SHA256SUMS.txt"
+          if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+            # made on the website: add the files to it
+            gh release upload "$TAG" $files --repo "$REPO" --clobber
+            gh release edit "$TAG" --repo "$REPO" --notes-file notes.md
+          else
+            gh release create "$TAG" $files --repo "$REPO" --title "$TAG" --notes-file notes.md
+          fi
+
+      - name: Post the release to Discord
+        # A card in the Discord server's #dll-mod-updates channel: the download,
+        # what's new, the hash and the VirusTotal report. Only when the
+        # repository has a DISCORD_DLL_UPDATES_WEBHOOK secret. The release is out
+        # already, so a Discord problem only marks this step.
+        continue-on-error: true
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_DLL_UPDATES_WEBHOOK }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK" ]; then
+            echo "No DISCORD_DLL_UPDATES_WEBHOOK secret, so nothing was posted to Discord."
+            exit 0
+          fi
+          name="${REPO#*/}"
+          zip="$name.zip"
+          sha=$(tr -d '\r' < release/SHA256SUMS.txt | awk -v f="$zip" '$2 == f { print toupper($1) }')
+
+          # What's new: the commits since the last tag, newest first. A commit
+          # with a body gives its body (joined into one line), one without gives
+          # its subject; messages that only name a version are left out.
+          prev=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
+          range="$TAG"
+          if [ -n "$prev" ]; then range="$prev..$TAG"; fi
+          news=$(git log "$range" --no-merges --format='%s%x1f%b%x1e' | awk '
+            BEGIN { RS = "\036"; FS = "\037" }
+            {
+              s = $1; b = $2
+              gsub(/\n/, " ", s); gsub(/\n/, " ", b)
+              gsub(/^ +| +$/, "", s); gsub(/  +/, " ", b); gsub(/^ +| +$/, "", b)
+              if (b ~ /^v?[0-9]+(\.[0-9]+)+$/) b = ""
+              line = (b != "") ? b : s
+              if (line == "" || line ~ /^v?[0-9]+(\.[0-9]+)+$/ || seen[line]++) next
+              print "- " line
+            }')
+
+          jq -n \
+            --arg title "${name//-/ } $TAG" \
+            --arg page "$SERVER/$REPO/releases/tag/$TAG" \
+            --arg zip "$zip" \
+            --arg zipurl "$SERVER/$REPO/releases/download/$TAG/$zip" \
+            --arg whatsnew "What's new" \
+            --arg news "$news" \
+            --arg sha "$sha" \
+            --arg day "$(date -u +%F)" '
+            ($news | if length > 1000 then .[0:990] + "…" else . end) as $n |
+            {
+              allowed_mentions: { parse: [] },
+              embeds: [{
+                title: $title,
+                url: $page,
+                color: 10181046,
+                description: "**[Download from GitHub](\($zipurl))** (`\($zip)`)\n\nIn the mod manager, click **Get mods** to update it.",
+                fields: (
+                  (if $n != "" then [{ name: $whatsnew, value: $n }] else [] end)
+                  + (if $sha != "" then [{
+                      name: "Check your download",
+                      value: "SHA-256: `\($sha)`\n[VirusTotal report](https://www.virustotal.com/gui/file/\($sha)) - [Release page](\($page))"
+                    }] else [] end)
+                ),
+                footer: { text: "Released \($day)" }
+              }]
+            }' > discord.json
+          curl -fsS -H "Content-Type: application/json" -d @discord.json "$DISCORD_WEBHOOK"

@@ -1,0 +1,94 @@
+{
+  "id": "Daily Quests",
+  "name": "Daily Quests",
+  "description": "The online game's 808 one-off event quests come back as daily quests: {{count}} random ones each game day, different for every player. {{decals}} of them pay a decal that cannot be had any other way offline on the first clear; the rest pay Death Metals (Kill Coins without the Death Metals mod).",
+  "version": "0.2.0",
+  "author": "KSFA",
+  "category": "Game content",
+  "tags": [
+    "quests",
+    "daily",
+    "decals",
+    "death-metals",
+    "events"
+  ],
+  "game_version": [
+    "5.0.4.4.0 - 1.91",
+    "5.0.5.0.0 - 1.92"
+  ],
+  "requires": [],
+  "conflicts_with": [],
+  "min_manager_version": "0.12.0",
+  "plugin": "lid-dailyquests.dll",
+  "settings": [
+    {
+      "id": "count",
+      "label": "Quests a day",
+      "type": "integer",
+      "default": 5,
+      "min": 1,
+      "max": 30,
+      "step": 1,
+      "unit": "quests",
+      "help": "How many of the pool's quests are open each game day (from 10:00 UTC, or when the manager's Start a new game day is used). They are picked at random for you, and stay the same all day, restarts included."
+    },
+    {
+      "id": "decals",
+      "label": "Decal quests a day",
+      "type": "integer",
+      "default": 1,
+      "min": 0,
+      "max": 30,
+      "step": 1,
+      "unit": "quests",
+      "help": "How many of the day's quests pay a decal on their first clear: one of the 80 that cannot be had any other way offline, each on a quest of its own. The rest pay Death Metals. 0 for none. Collab decals need the LET IT DIE Crossover Content pack; without it their quests do not come up. If there are fewer to pick from than asked, Death Metal quests make up the day."
+    },
+    {
+      "id": "repeat_reward",
+      "label": "Death Metal quests pay",
+      "type": "choice",
+      "default": "dm1",
+      "options": [
+        {"value": "dm1", "label": "1 to 5 Death Metals, by difficulty"},
+        {"value": "dm2", "label": "2 to 10 Death Metals, by difficulty"},
+        {"value": "dm3", "label": "3 to 15 Death Metals, by difficulty"},
+        {"value": "dm4", "label": "4 to 20 Death Metals, by difficulty"},
+        {"value": "original", "label": "The quest's own reward from the online game"}
+      ],
+      "help": "What the quests without a decal pay for every clear, and what a decal quest pays after its first. Death Metals need the Death Metals mod; without it, each Death Metal is paid as 5,000 Kill Coins, as the offline game does. The online rewards are mostly items, Kill Coins and Lost Bags."
+    }
+  ],
+  "patches": [
+    {
+      "type": "raw_sql_file",
+      "path": "quests.sql",
+      "description": "808 quests, their goals and their decal rewards"
+    },
+    {
+      "type": "raw_sql",
+      "id": "count",
+      "description": "{{count}} quests a day",
+      "sql": "DELETE FROM master_const_int WHERE id = 'LID_DAILY_QUEST_COUNT';\nINSERT INTO master_const_int (id, value) VALUES ('LID_DAILY_QUEST_COUNT', {{count}});"
+    },
+    {
+      "type": "raw_sql",
+      "id": "decals",
+      "description": "{{decals}} decal quests a day",
+      "sql": "DELETE FROM master_const_int WHERE id = 'LID_DAILY_DECAL_COUNT';\nINSERT INTO master_const_int (id, value) VALUES ('LID_DAILY_DECAL_COUNT', {{decals}});"
+    },
+    {
+      "type": "raw_sql",
+      "id": "death-metals",
+      "when": {"repeat_reward": ["dm1", "dm2", "dm3", "dm4"]},
+      "description": "The quests pay Death Metals",
+      "sql": "UPDATE master_quest SET rwd = 'RWD_MEDAL_' || MIN(20, MAX(1, (lvl / 2) * CAST(substr('{{repeat_reward}}', 3) AS INTEGER))) WHERE start_date = 1 AND end_date = 2 AND event_type = 'QUESTEVENT_NORMAL';\nUPDATE master_quest SET first_rwd = rwd WHERE start_date = 1 AND end_date = 2 AND event_type = 'QUESTEVENT_NORMAL' AND first_rwd NOT LIKE 'RWD_LID_DQ_%';"
+    },
+    {
+      "type": "raw_sql",
+      "id": "online-reward",
+      "when": {"repeat_reward": "original"},
+      "description": "The quests pay the online rewards",
+      "sql": "UPDATE master_quest SET rwd = (SELECT o.rwd FROM master_quest_online o WHERE o.qid = master_quest.qid) WHERE start_date = 1 AND end_date = 2 AND event_type = 'QUESTEVENT_NORMAL' AND qid IN (SELECT qid FROM master_quest_online);\nUPDATE master_quest SET first_rwd = (SELECT o.first_rwd FROM master_quest_online o WHERE o.qid = master_quest.qid) WHERE start_date = 1 AND end_date = 2 AND event_type = 'QUESTEVENT_NORMAL' AND first_rwd NOT LIKE 'RWD_LID_DQ_%' AND qid IN (SELECT qid FROM master_quest_online);"
+    }
+  ]
+}
